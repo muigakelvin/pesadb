@@ -26,9 +26,9 @@ Unlike traditional databases with full SQL parsers and query planners, PesaDB us
 └───────────────────┘
 ```
 
-* **No parser**: Input is split on whitespace; no AST or grammar.
-* **No planner**: Commands map directly to method calls.
-* **Yes to storage**: Full WAL-based page management with ACID semantics.
+- **No parser**: Input is split on whitespace; no AST or grammar.
+- **No planner**: Commands map directly to method calls.
+- **Yes to storage**: Full WAL-based page management with ACID semantics.
 
 This makes PesaDB ideal for **learning**, **debugging**, and **incremental extension**.
 
@@ -38,29 +38,28 @@ This makes PesaDB ideal for **learning**, **debugging**, and **incremental exten
 
 PesaDB’s durability and consistency come from its **Write-Ahead Log**, which follows three principles:
 
-1. **Never overwrite main data before commit**
+1. **Never overwrite main data before commit**  
    The main DB file (`*.pesa`) is only modified during **checkpointing** or **recovery**.
 
-2. **All committed changes live in the log**
+2. **All committed changes live in the log**  
    Every modified page is appended as a full 4096-byte image to the WAL (`*.pesa-wal`).
 
-3. **Readers use snapshot boundaries**
+3. **Readers use snapshot boundaries**  
    When a reader starts, it records the current WAL size. It only sees entries **up to that offset**.
 
 ### What Does “Commit” Mean?
 
-* **Before commit**: Changes are tentative, invisible to others, discardable.
-* **After commit**: Changes are **durable** (survive crashes) and **visible**.
+- **Before commit**: Changes are tentative, invisible to others, discardable.  
+- **After commit**: Changes are **durable** (survive crashes) and **visible**.
 
 In WAL terms, a transaction is **committed** when:
-
-* Its **commit marker** is written to the WAL
-* `fsync(wal_fd)` succeeds
+- Its **commit marker** is written to the WAL
+- `fsync(wal_fd)` succeeds
 
 This is where **ACID** is enforced:
 
 | Property    | Guarantee                                  |
-| ----------- | ------------------------------------------ |
+|-------------|--------------------------------------------|
 | Atomicity   | All page writes succeed or none do         |
 | Consistency | Only valid DB states are persisted         |
 | Isolation   | Readers never see partial/uncommitted data |
@@ -73,7 +72,6 @@ This is where **ACID** is enforced:
 PesaDB uses **physical logging**: it stores raw page images, not logical SQL.
 
 ### Page Record
-
 ```c
 typedef struct {
     uint32_t type;      // = 1 (WAL_PAGE)
@@ -84,7 +82,6 @@ typedef struct {
 ```
 
 ### Commit Record
-
 ```c
 typedef struct {
     uint32_t type;      // = 2 (WAL_COMMIT)
@@ -100,33 +97,26 @@ typedef struct {
 ## 🔄 Data Flow in WAL
 
 ### Write Path
-
 1. **Load page** from main DB into memory
 2. **Modify page** in RAM (e.g., insert row)
 3. **Append page image** to WAL (with `tx_id`, `page_id`)
 4. **Write commit marker** + `fsync()`
 
 ### Read Path
-
 1. Reader starts → records current WAL size as **snapshot**
 2. To read a page:
-
-   * Scan WAL **backward** from snapshot
-   * If a **committed** page record exists → use it
-   * Else → read from main DB
+   - Scan WAL **backward** from snapshot
+   - If a **committed** page record exists → use it
+   - Else → read from main DB
 
 ### Recovery
-
 On startup:
-
 1. Scan WAL forward
 2. Track which `tx_id`s have commit markers
 3. Replay **only committed** pages into main DB
 
 ### Checkpointing
-
 Every 10 writes:
-
 1. Find **oldest active reader’s snapshot**
 2. Copy **committed pages beyond that point** into main DB
 3. Truncate WAL safely
@@ -138,44 +128,37 @@ This prevents unbounded growth while preserving reader consistency.
 ## 🗃️ Data Model
 
 ### Supported Types
-
-* `INT`: 64-bit signed integer
-* `TEXT`: UTF-8 string
+- `INT`: 64-bit signed integer
+- `TEXT`: UTF-8 string
 
 ### Constraints
-
-* **Primary Key**: Exactly one per table; enables fast lookup & enforces uniqueness
-* **Unique**: Optional per-column constraint
+- **Primary Key**: Exactly one per table; enables fast lookup & enforces uniqueness
+- **Unique**: Optional per-column constraint
 
 ### Storage Format
-
-* Each row is serialized as **JSON**
-* Stored in **4096-byte pages**
-* Deleted rows marked with `{"__deleted__": true}`
+- Each row is serialized as **JSON**
+- Stored in **4096-byte pages**
+- Deleted rows marked with `{"__deleted__": true}`
 
 ---
 
 ## 🛠️ Build & Run
 
 ### Requirements
-
-* GCC (C11 support)
-* Python 3.x development headers (`python3-dev`)
+- GCC (C11 support)
+- Python 3.x development headers (`python3-dev`)
 
 ### Build
-
 ```bash
 make
 ```
 
 ### Launch REPL
-
 ```bash
 python repl.py
 ```
 
 ### Example Session
-
 ```sql
 INS users 1 Alice
 INS users 2 Bob
@@ -185,7 +168,6 @@ JOIN users orders ON id user_id
 ```
 
 Output:
-
 ```json
 {"id":1,"name":"Alice","order_id":101,"user_id":1,"item":"Laptop"}
 {"id":2,"name":"Bob","order_id":102,"user_id":2,"item":"Mouse"}
@@ -214,12 +196,12 @@ pesadb/
 
 ---
 
-## 💡 Why I Chose This Design?
+## 💡 Why This Design?
 
-* **Educational**: Demonstrates how WAL enables ACID without complex undo/redo
-* **Debuggable**: No hidden layers; every step is explicit
-* **Extensible**: Easy to add B-trees, query parsing, or multi-threading
-* **Realistic**: Mirrors SQLite’s physical logging approach
+- **Educational**: Demonstrates how WAL enables ACID without complex undo/redo
+- **Debuggable**: No hidden layers; every step is explicit
+- **Extensible**: Easy to add B-trees, query parsing, or multi-threading
+- **Realistic**: Mirrors SQLite’s physical logging approach
 
 > **“In WAL, the log is the database.”** Until checkpointing, all truth lives in the WAL.
 
@@ -227,10 +209,11 @@ pesadb/
 
 ## 📚 References
 
-* [SQLite WAL Internals](https://www.sqlite.org/wal.html)
-* [Write-Ahead Logging (Wikipedia)](https://en.wikipedia.org/wiki/Write-ahead_logging)
-* [Python C API Documentation](https://docs.python.org/3/c-api/)
+- [SQLite WAL Internals](https://www.sqlite.org/wal.html)
+- [Write-Ahead Logging (Wikipedia)](https://en.wikipedia.org/wiki/Write-ahead_logging)
+- [Python C API Documentation](https://docs.python.org/3/c-api/)
 
 ---
 
 PesaDB is **not production-ready**, but it’s a **correct**, **minimal**, and **illuminating** implementation of core database concepts. Perfect for builders who want to understand how real systems work—**from the ground up**.
+
