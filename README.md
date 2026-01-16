@@ -49,17 +49,18 @@ PesaDB’s durability and consistency come from its **Write-Ahead Log**, which f
 
 ### What Does “Commit” Mean?
 
-- **Before commit**: Changes are tentative, invisible to others, discardable.  
+- **Before commit**: Changes are tentative, invisible to others, discardable.
 - **After commit**: Changes are **durable** (survive crashes) and **visible**.
 
 In WAL terms, a transaction is **committed** when:
+
 - Its **commit marker** is written to the WAL
 - `fsync(wal_fd)` succeeds
 
 This is where **ACID** is enforced:
 
 | Property    | Guarantee                                  |
-|-------------|--------------------------------------------|
+| ----------- | ------------------------------------------ |
 | Atomicity   | All page writes succeed or none do         |
 | Consistency | Only valid DB states are persisted         |
 | Isolation   | Readers never see partial/uncommitted data |
@@ -72,6 +73,7 @@ This is where **ACID** is enforced:
 PesaDB uses **physical logging**: it stores raw page images, not logical SQL.
 
 ### Page Record
+
 ```c
 typedef struct {
     uint32_t type;      // = 1 (WAL_PAGE)
@@ -82,6 +84,7 @@ typedef struct {
 ```
 
 ### Commit Record
+
 ```c
 typedef struct {
     uint32_t type;      // = 2 (WAL_COMMIT)
@@ -97,12 +100,14 @@ typedef struct {
 ## 🔄 Data Flow in WAL
 
 ### Write Path
+
 1. **Load page** from main DB into memory
 2. **Modify page** in RAM (e.g., insert row)
 3. **Append page image** to WAL (with `tx_id`, `page_id`)
 4. **Write commit marker** + `fsync()`
 
 ### Read Path
+
 1. Reader starts → records current WAL size as **snapshot**
 2. To read a page:
    - Scan WAL **backward** from snapshot
@@ -110,13 +115,17 @@ typedef struct {
    - Else → read from main DB
 
 ### Recovery
+
 On startup:
+
 1. Scan WAL forward
 2. Track which `tx_id`s have commit markers
 3. Replay **only committed** pages into main DB
 
 ### Checkpointing
+
 Every 10 writes:
+
 1. Find **oldest active reader’s snapshot**
 2. Copy **committed pages beyond that point** into main DB
 3. Truncate WAL safely
@@ -128,14 +137,17 @@ This prevents unbounded growth while preserving reader consistency.
 ## 🗃️ Data Model
 
 ### Supported Types
+
 - `INT`: 64-bit signed integer
 - `TEXT`: UTF-8 string
 
 ### Constraints
+
 - **Primary Key**: Exactly one per table; enables fast lookup & enforces uniqueness
 - **Unique**: Optional per-column constraint
 
 ### Storage Format
+
 - Each row is serialized as **JSON**
 - Stored in **4096-byte pages**
 - Deleted rows marked with `{"__deleted__": true}`
@@ -145,20 +157,24 @@ This prevents unbounded growth while preserving reader consistency.
 ## 🛠️ Build & Run
 
 ### Requirements
+
 - GCC (C11 support)
 - Python 3.x development headers (`python3-dev`)
 
 ### Build
+
 ```bash
 make
 ```
 
 ### Launch REPL
+
 ```bash
 python repl.py
 ```
 
 ### Example Session
+
 ```sql
 INS users 1 Alice
 INS users 2 Bob
@@ -168,6 +184,7 @@ JOIN users orders ON id user_id
 ```
 
 Output:
+
 ```json
 {"id":1,"name":"Alice","order_id":101,"user_id":1,"item":"Laptop"}
 {"id":2,"name":"Bob","order_id":102,"user_id":2,"item":"Mouse"}
@@ -196,7 +213,7 @@ pesadb/
 
 ---
 
-## 💡 Why This Design?
+## 💡 Why I Chose This Design?
 
 - **Educational**: Demonstrates how WAL enables ACID without complex undo/redo
 - **Debuggable**: No hidden layers; every step is explicit
@@ -214,6 +231,3 @@ pesadb/
 - [Python C API Documentation](https://docs.python.org/3/c-api/)
 
 ---
-
-PesaDB is **not production-ready**, but it’s a **correct**, **minimal**, and **illuminating** implementation of core database concepts. Perfect for builders who want to understand how real systems work—**from the ground up**.
-
