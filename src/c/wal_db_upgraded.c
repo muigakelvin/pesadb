@@ -204,7 +204,7 @@ static bool wal_read_page(uint32_t page_id, uint64_t snapshot, void *out) {
 }
 
 /* ================= HIGH-LEVEL API ================= */
-static void write_page(WriteTxn *tx, uint32_t page_id, void *data) {
+static void write_page_int(WriteTxn *tx, uint32_t page_id, void *data) {
     CachedPage* cp = get_or_create_cached_page(page_id, tx->tx_id);
     memcpy(cp->data, data, PAGE_SIZE);
     cp->dirty = true;
@@ -222,7 +222,7 @@ static void commit_tx(WriteTxn *tx) {
 }
 
 /* ================= READ API ================= */
-static void read_page(ReaderTxn *rx, uint32_t page_id, void *out) {
+static void read_page_int(ReaderTxn *rx, uint32_t page_id, void *out) {
     CachedPage* cp = find_cached_page(page_id);
     if (cp) {
         memcpy(out, cp->data, PAGE_SIZE);
@@ -244,7 +244,7 @@ static uint64_t oldest_reader_snapshot() {
     return min;
 }
 
-static void checkpoint() {
+static void checkpoint_int() {
     uint64_t safe = oldest_reader_snapshot();
     off_t pos = 0;
     lseek(wal_fd, 0, SEEK_SET);
@@ -322,11 +322,11 @@ ReaderTxn waldb_begin_read(void) {
 }
 
 void waldb_write_page(WriteTxn* txn, uint32_t page_id, const void* data) {
-    write_page(txn, page_id, (void*)data);
+    write_page_int(txn, page_id, (void*)data);
 }
 
 void waldb_read_page(ReaderTxn* txn, uint32_t page_id, void* buffer) {
-    read_page(txn, page_id, buffer);
+    read_page_int(txn, page_id, buffer);
 }
 
 void waldb_commit(WriteTxn* txn) {
@@ -334,5 +334,52 @@ void waldb_commit(WriteTxn* txn) {
 }
 
 void waldb_checkpoint(void) {
-    checkpoint();
+    checkpoint_int();
+}
+
+/* =============== PYTHON-FRIENDLY EXPORTS =============== */
+// These match the names used in executor.py
+
+void open_db(const char* path) {
+    waldb_open(path);
+}
+
+void* begin_read(void) {
+    ReaderTxn* txn = malloc(sizeof(ReaderTxn));
+    *txn = waldb_begin_read();
+    return txn;
+}
+
+void* begin_write(void) {
+    WriteTxn* txn = malloc(sizeof(WriteTxn));
+    *txn = waldb_begin_write();
+    return txn;
+}
+
+void commit(void* txn_ptr) {
+    if (!txn_ptr) return;
+    WriteTxn* txn = (WriteTxn*)txn_ptr;
+    waldb_commit(txn);
+    free(txn);
+}
+
+void checkpoint(void) {
+    waldb_checkpoint();
+}
+
+unsigned char (*read_page(void* txn_ptr, int page_id))[4096] {
+    static unsigned char buffer[4096];
+    memset(buffer, 0, sizeof(buffer));
+    if (!txn_ptr) {
+        return &buffer;
+    }
+    ReaderTxn* txn = (ReaderTxn*)txn_ptr;
+    waldb_read_page(txn, (uint32_t)page_id, buffer);
+    return &buffer;
+}
+
+void write_page(void* txn_ptr, int page_id, unsigned char (*data)[4096]) {
+    if (!txn_ptr || !data) return;
+    WriteTxn* txn = (WriteTxn*)txn_ptr;
+    waldb_write_page(txn, (uint32_t)page_id, *data);
 }

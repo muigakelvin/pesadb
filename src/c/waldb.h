@@ -2,18 +2,16 @@
 #define WALDB_H
 
 #include <stdint.h>
-#include <stddef.h>   // ← ADD THIS (for size_t, NULL)
+#include <stddef.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Transaction types
 typedef struct { uint32_t id; } WriteTxn;
 typedef struct { uint64_t snapshot; } ReaderTxn;
 
-// Core WAL API
 void waldb_open(const char* path);
 void waldb_close(void);
 WriteTxn waldb_begin_write(void);
@@ -23,7 +21,6 @@ void waldb_read_page(ReaderTxn* txn, uint32_t page_id, void* buffer);
 void waldb_commit(WriteTxn* txn);
 void waldb_checkpoint(void);
 
-// Hash join declaration (only declaration!)
 int hash_join(
     const char* inner_pages[], size_t inner_count,
     const char* outer_pages[], size_t outer_count,
