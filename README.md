@@ -5,16 +5,16 @@
 > CRUD operations, primary and unique constraints, indexing, and hash
 > joins---backed by a crash-safe **Write-Ahead Logging (WAL)** engine.
 >
-> The project is intentionally **low-level and explicit**: no SQL
-> parser, no optimizer, no hidden layers---just direct execution wired
+> The system is intentionally **low-level and explicit**: no SQL parser,
+> no optimizer, no hidden abstractions---just direct execution wired
 > into a real WAL-backed storage engine.
 
 ------------------------------------------------------------------------
 
 ## 🧠 Architecture Overview
 
-Unlike traditional databases with full SQL parsers and planners, PesaDB
-uses a **flat execution model**:
+PesaDB uses a **flat execution model**, avoiding traditional SQL parsing
+and planning layers:
 
     ┌──────────┐
     │   REPL   │ ← Interactive shell (`repl.py`)
@@ -32,34 +32,35 @@ uses a **flat execution model**:
     │ Storage Engine    │ ← C WAL engine (`wal_db_upgraded.c`)
     └───────────────────┘
 
-### Design Characteristics
+### Key Characteristics
 
--   **No SQL parser**: Commands are tokenized via whitespace splitting
--   **No query planner**: Each command maps directly to executor logic
--   **Physical WAL storage**: Full page images written to log
--   **Snapshot isolation**: Readers see consistent database views
--   **Minimal abstractions**: Every system boundary is visible
+-   **No SQL parser**: Commands are whitespace-tokenized
+-   **No query planner**: Commands map directly to execution logic
+-   **Physical WAL**: Full-page images logged
+-   **Snapshot isolation**: Readers see consistent views
+-   **Minimal abstractions**: Every boundary is explicit and inspectable
 
-This makes PesaDB ideal for **learning how databases actually work**,
-debugging persistence issues, and incrementally extending features.
+This makes PesaDB ideal for **learning database internals**, debugging
+persistence behavior, and controlled extension.
 
 ------------------------------------------------------------------------
 
 ## 🔒 Write-Ahead Logging (WAL): Core Rules
 
-PesaDB enforces durability and isolation through three WAL invariants:
+PesaDB enforces durability and isolation using three strict WAL
+invariants:
 
 1.  **Never overwrite main data before commit**\
-    The main database file (`data.pesa`) is only modified during
+    The main DB file (`data.pesa`) is only updated during
     **checkpointing** or **crash recovery**.
 
 2.  **All committed changes live in the log**\
-    Every modified page is appended as a **full 4096-byte image** to the
-    WAL file (`data.pesa-wal`).
+    Every modified page is appended as a **4096-byte image** to the WAL
+    (`data.pesa-wal`).
 
 3.  **Readers operate on snapshots**\
-    When a reader starts, it records the current WAL size and only
-    observes entries **up to that offset**.
+    Readers record the current WAL size at start and only see entries up
+    to that offset.
 
 > Until checkpointing occurs, **the WAL is the database**.
 
@@ -67,31 +68,29 @@ PesaDB enforces durability and isolation through three WAL invariants:
 
 ## 🔐 Transaction Semantics & ACID
 
-### What Does "Commit" Mean?
+### Commit Definition
 
 A transaction is considered **committed** when:
 
 -   All modified page images are written to the WAL
--   A **commit marker** is appended
+-   A **commit record** is appended
 -   `fsync(wal_fd)` completes successfully
+
+If a crash happens **before** the commit record, the transaction is
+**discarded**.
 
 ### ACID Guarantees
 
   Property      Guarantee
-  ------------- ------------------------------------------
-  Atomicity     Either all page writes commit or none do
-  Consistency   Only valid database states reach disk
-  Isolation     Readers never observe partial writes
+  ------------- ---------------------------------
+  Atomicity     All-or-nothing page commits
+  Consistency   Only valid states persist
+  Isolation     No partial reads
   Durability    Committed data survives crashes
-
-If a crash occurs **before** the commit marker is written, the
-transaction is **discarded entirely** during recovery.
 
 ------------------------------------------------------------------------
 
 ## 📦 WAL Record Structures (Physical Logging)
-
-PesaDB uses **physical logging** rather than logical SQL logging.
 
 ### Page Record
 
@@ -99,7 +98,7 @@ PesaDB uses **physical logging** rather than logical SQL logging.
 typedef struct {
     uint32_t type;        // WAL_PAGE = 1
     uint32_t tx_id;       // Transaction ID
-    uint32_t page_id;     // Page number in DB
+    uint32_t page_id;     // Page number
     uint8_t  data[4096];  // Full page image
 } WalPageRecord;
 ```
@@ -114,9 +113,8 @@ typedef struct {
 } WalCommitRecord;
 ```
 
-**Critical detail:** page records are written **before** the commit
-marker.\
-Missing commit marker ⇒ transaction is ignored during recovery.
+Page records are written **before** the commit record. Missing commit ⇒
+transaction ignored during recovery.
 
 ------------------------------------------------------------------------
 
@@ -124,58 +122,50 @@ Missing commit marker ⇒ transaction is ignored during recovery.
 
 ### Write Path
 
-1.  Load page from main DB into memory
-2.  Modify page in RAM (insert/update/delete)
+1.  Load page into memory
+2.  Modify page
 3.  Append page image to WAL
 4.  Append commit record
 5.  `fsync()` WAL
 
 ### Read Path
 
-1.  Reader starts → records WAL size as snapshot
-2.  To read a page:
-    -   Scan WAL **backward** from snapshot
-    -   Use newest committed page record if found
-    -   Otherwise read from main DB file
+1.  Record WAL snapshot
+2.  Scan WAL backward
+3.  Use newest committed page
+4.  Fallback to main DB
 
 ### Crash Recovery
 
-On startup:
-
 1.  Scan WAL forward
-2.  Track committed transaction IDs
-3.  Replay **only committed pages**
-4.  Ignore incomplete transactions
+2.  Identify committed transactions
+3.  Replay committed pages only
 
 ### Checkpointing
 
-Triggered every **N writes** (currently 10):
-
-1.  Determine oldest active reader snapshot
-2.  Flush committed pages older than snapshot to main DB
-3.  Safely truncate WAL
-
-This ensures bounded WAL growth while preserving snapshot isolation.
+-   Triggered every **N writes** (currently 10)
+-   Flushes committed pages to `data.pesa`
+-   Truncates WAL safely
 
 ------------------------------------------------------------------------
 
 ## 🗃️ Data Model
 
-### Supported Column Types
+### Types
 
 -   `INT` --- 64-bit signed integer
--   `TEXT` --- UTF-8 encoded string
+-   `TEXT` --- UTF-8 string
 
 ### Constraints
 
--   **Primary Key** (exactly one per table)
--   **Unique constraints** (optional per column)
+-   Exactly one **Primary Key** per table
+-   Optional **Unique** constraints
 
 ### Row Storage
 
 -   Rows serialized as **JSON**
--   Stored inside **4096-byte pages**
--   Deleted rows marked as:
+-   Stored in **4096-byte pages**
+-   Deleted rows marked with:
 
 ``` json
 {"__deleted__": true}
@@ -185,10 +175,10 @@ This ensures bounded WAL growth while preserving snapshot isolation.
 
 ## 🔗 Joins
 
--   Hash joins implemented in **C** via Python C API
--   Executor builds hash table on join key
--   Join results streamed back to Python layer
--   Supports equality joins only (by design)
+-   Equality **hash joins**
+-   Implemented in **C** via Python C API
+-   Hash table built on join key
+-   Results streamed to Python executor
 
 Example:
 
@@ -203,7 +193,8 @@ JOIN users orders ON id user_id
 ### Requirements
 
 -   GCC (C11)
--   Python 3.x + headers (`python3-dev`)
+-   Python 3.x + `python3-dev`
+-   Node.js (for frontend)
 
 ### Build
 
@@ -219,7 +210,7 @@ make
 python repl.py
 ```
 
-Example session:
+Example:
 
 ``` sql
 INS users 1 Alice
@@ -228,23 +219,38 @@ SEL users
 exit
 ```
 
-✅ Data persists across restarts because: - WAL recovery replays
-committed writes - Tables are created only if missing - Checkpointing
-flushes pages to `data.pesa`
+✔ Data persists across restarts via WAL recovery and checkpointing.
 
 ------------------------------------------------------------------------
 
-## 🌐 Mode 2: Web UI (FastAPI + React)
+## 🌐 Mode 2: Web UI (API + Frontend)
 
-Start backend:
+### Step 1: Start Backend API
 
 ``` bash
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-⚠️ **Important persistence caveat**
+### Step 2: Start Frontend (React)
 
--   `api.py` currently **recreates tables on startup if missing**
+``` bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then open:
+
+    http://localhost:5173
+
+The frontend communicates with the FastAPI backend to execute database
+commands.
+
+------------------------------------------------------------------------
+
+## ⚠️ Persistence Caveat (Important)
+
+-   `api.py` currently **recreates tables if missing**
 -   If the catalog exists only in WAL (no checkpoint yet):
     -   Tables appear missing
     -   API recreates them
@@ -252,9 +258,9 @@ uvicorn api:app --host 0.0.0.0 --port 8000
 
 ### How to Avoid This
 
-✅ Always insert at least **one row after creating tables** (forces
+✅ Insert **at least one row** after creating tables (forces
 checkpoint)\
-✅ Or change API logic:
+✅ Or guard initialization logic:
 
 ``` python
 if not db.tables:
@@ -267,11 +273,11 @@ if not db.tables:
 
     pesadb/
     ├── src/c/
-    │   ├── wal_db_upgraded.c  # WAL engine
-    │   ├── hashjoin.c         # Hash join (C)
+    │   ├── wal_db_upgraded.c
+    │   ├── hashjoin.c
     │   └── waldb.h
     ├── src/python/
-    │   └── executor.py       # Tables, indexes, bindings
+    │   └── executor.py
     ├── build/
     │   └── libwaldb.so
     ├── data/
@@ -284,20 +290,21 @@ if not db.tables:
 
 ------------------------------------------------------------------------
 
-## 💡 Why This Design?
+## 💡 Design Rationale
 
--   **Educational**: Demonstrates real WAL mechanics
--   **Debuggable**: No hidden planners or optimizers
--   **Faithful**: Mirrors SQLite-style physical WAL
--   **Extensible**: Easy to add B-Trees, SQL parsing, MVCC
+-   **Educational**: Exposes real WAL mechanics
+-   **Debuggable**: No hidden layers
+-   **Faithful**: SQLite-style physical logging
+-   **Extensible**: Clear path to B-trees, SQL parsing, MVCC
 
 > **"In WAL, the log is the database."**\
-> The main DB file is merely a cached checkpoint.
+> The main DB file is just a checkpointed cache.
 
 ------------------------------------------------------------------------
 
 ## 📚 References
 
--   SQLite WAL Internals
--   Write-Ahead Logging (Wikipedia)
--   Python C API Documentation
+-   [SQLite WAL Internals](https://www.sqlite.org/wal.html)
+-   [Write-Ahead Logging ---
+    Wikipedia](https://en.wikipedia.org/wiki/Write-ahead_logging)
+-   [Python C API Documentation](https://docs.python.org/3/c-api/)
