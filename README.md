@@ -42,27 +42,13 @@ and planning layers entirely:
 * **Snapshot isolation** — readers see consistent views
 * **Minimal abstractions** — every boundary is explicit and inspectable
 
-This makes PesaDB ideal for **learning database internals**, debugging
-persistence behavior, and controlled extension.
-
 ---
 
 ## 🔒 Write-Ahead Logging (WAL): Core Rules
 
-PesaDB enforces durability and isolation using three strict WAL
-invariants:
-
 1. **Never overwrite main data before commit**
-   The main database file (`data.pesa`) is only modified during
-   **checkpointing** or **crash recovery**.
-
 2. **All committed changes live in the log**
-   Every modified page is appended as a **4096-byte page image** to the WAL
-   (`data.pesa-wal`).
-
 3. **Readers operate on snapshots**
-   Readers record the WAL size at query start and only observe entries up
-   to that offset.
 
 > Until checkpointing occurs, **the WAL is the database**.
 
@@ -70,129 +56,7 @@ invariants:
 
 ## 🔐 Transaction Semantics & ACID
 
-### Commit Definition
-
-A transaction is considered **committed** when:
-
-* All modified page images are written to the WAL
-* A **commit record** is appended
-* `fsync(wal_fd)` completes successfully
-
-If a crash occurs **before** the commit record is written, the transaction
-is **discarded** during recovery.
-
-### ACID Guarantees
-
-| Property    | Guarantee                       |
-|------------|---------------------------------|
-| Atomicity  | All-or-nothing page commits     |
-| Consistency| Only valid states persist       |
-| Isolation  | No partial reads                |
-| Durability | Committed data survives crashes |
-
----
-
-## 📦 WAL Record Structures (Physical Logging)
-
-### Page Record
-
-```c
-typedef struct {
-    uint32_t type;        // WAL_PAGE = 1
-    uint32_t tx_id;       // Transaction ID
-    uint32_t page_id;     // Page number
-    uint8_t  data[4096];  // Full page image
-} WalPageRecord;
-```
-
-### Commit Record
-
-```c
-typedef struct {
-    uint32_t type;        // WAL_COMMIT = 2
-    uint32_t tx_id;
-    uint32_t magic;       // 0xC0DECAFE
-} WalCommitRecord;
-```
-
-Page records are always written **before** the commit record.
-A missing commit record ⇒ transaction ignored during recovery.
-
----
-
-## 🔄 WAL Data Flow
-
-### Write Path
-1. Load page into memory
-2. Modify page
-3. Append page image to WAL
-4. Append commit record
-5. `fsync()` WAL
-
-### Read Path
-1. Record WAL snapshot offset
-2. Scan WAL backward
-3. Use newest committed page
-4. Fallback to main DB
-
-### Crash Recovery
-1. Scan WAL forward
-2. Identify committed transactions
-3. Replay committed pages only
-
-### Checkpointing
-* Triggered every **N writes** (currently 10)
-* Flushes committed pages to `data.pesa`
-* Truncates WAL safely
-
----
-
-## 🗃️ Data Model
-
-### Types
-* `INT` — 64-bit signed integer
-* `TEXT` — UTF-8 string
-
-### Constraints
-* Exactly one **Primary Key** per table
-* Optional **Unique** constraints
-
-### Row Storage
-* Rows serialized as **JSON**
-* Stored in **4096-byte pages**
-* Deleted rows marked as:
-
-```json
-{"__deleted__": true}
-```
-
----
-
-## 🔗 Joins
-
-* Equality **hash joins**
-* Implemented in **C** via the Python C API
-* Hash table built on join key
-* Results streamed to the Python executor
-
-Example:
-```sql
-JOIN users orders ON id user_id
-```
-
----
-
-## 🖥️ Running PesaDB
-
-### Requirements
-* GCC (C11)
-* Python 3.x + `python3-dev`
-* Node.js (for frontend)
-
-### Build
-```bash
-make
-```
+A transaction commits only after WAL flush and commit record fsync.
 
 ---
 
@@ -203,6 +67,7 @@ python repl.py
 ```
 
 ### Full CRUD Example in REPL
+
 ```sql
 INS users 1 Alice
 INS users 2 Bob
@@ -218,7 +83,67 @@ exit
 
 ---
 
+## 🌐 Mode 2: Web UI (API + Frontend)
+
+### Step 1: Start Backend API
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+### Step 2: Start Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open in browser:
+
+```
+http://localhost:5173
+```
+
+The frontend communicates with the FastAPI backend to execute database
+commands via HTTP.
+
+---
+
+## 📁 Project Structure
+
+```
+pesadb/
+├── src/c/
+│   ├── wal_db_upgraded.c
+│   ├── hashjoin.c
+│   └── waldb.h
+├── src/python/
+│   └── executor.py
+├── build/
+│   └── libwaldb.so
+├── data/
+│   ├── data.pesa
+│   └── data.pesa-wal
+├── repl.py
+├── api.py
+├── frontend/
+└── Makefile
+```
+
+---
+
+## 💡 Design Rationale
+
+* Educational
+* Debuggable
+* WAL-first persistence
+* Extensible architecture
+
+---
+
 ## 📚 References
+
 * SQLite WAL Internals
 * Write-Ahead Logging — Wikipedia
 * Python C API Documentation
