@@ -51,17 +51,17 @@ write_page.argtypes = [c_txn, ctypes.c_int, ctypes.POINTER(ctypes.c_ubyte * 4096
 write_page.restype = None
 
 # ----------------------------
-# Bind hash_join correctly
+# Bind hash_join correctly — NOW USING size_t
 # ----------------------------
 _lib.hash_join.argtypes = [
-    c_char_pp,          # const char** inner_rows
-    ctypes.c_int,       # int inner_count
-    c_char_pp,          # const char** outer_rows
-    ctypes.c_int,       # int outer_count
-    ctypes.c_char_p,    # const char* inner_key
-    ctypes.c_char_p,    # const char* outer_key
+    c_char_pp,              # const char** inner_rows
+    ctypes.c_size_t,        # size_t inner_count
+    c_char_pp,              # const char** outer_rows
+    ctypes.c_size_t,        # size_t outer_count
+    ctypes.c_char_p,        # const char* inner_key
+    ctypes.c_char_p,        # const char* outer_key
     ctypes.POINTER(ctypes.c_char),  # char* output_buf
-    ctypes.c_int        # int output_buf_size
+    ctypes.c_size_t         # size_t output_buf_size
 ]
 _lib.hash_join.restype = ctypes.c_int
 
@@ -76,13 +76,13 @@ def hash_join_c(inner_rows: List[bytes], outer_rows: List[bytes],
 
     return _lib.hash_join(
         inner_arr,
-        len(inner_rows),
+        ctypes.c_size_t(len(inner_rows)),
         outer_arr,
-        len(outer_rows),
+        ctypes.c_size_t(len(outer_rows)),
         inner_key.encode('utf-8'),
         outer_key.encode('utf-8'),
         (ctypes.c_char * len(output_buf)).from_buffer(output_buf),
-        len(output_buf)
+        ctypes.c_size_t(len(output_buf))
     )
 
 # ----------------------------
@@ -110,11 +110,11 @@ class Column:
                 raise TypeError(f"Column '{self.name}' expects TEXT, got {type(value).__name__}")
 
 class Table:
-    def __init__(self, name: str, columns: List[Column], db_path: str):
+    def __init__(self, name: str, columns: List[Column], db_path: str, db: 'Database'):
         self.name = name
         self.columns = {col.name: col for col in columns}
         self.db_path = db_path
-        self._next_page = 1
+        self.db = db  # Reference to Database for page allocation
         self._pk_col = next((col.name for col in columns if col.primary_key), None)
         self._unique_cols = [col.name for col in columns if col.unique]
         self._pk_index = {}
@@ -122,14 +122,22 @@ class Table:
         self._rebuild_indexes()
 
     def _serialize_row(self, row: Dict[str, Any]) -> bytes:
-        return json.dumps(row).encode('utf-8')
+        # Tag every row with its table name for isolation
+        tagged_row = {"__table__": self.name, **row}
+        return json.dumps(tagged_row).encode('utf-8')
 
     def _deserialize_row(self, data: bytes) -> Optional[Dict[str, Any]]:
         try:
             text = data.rstrip(b'\x00').decode('utf-8')
             if not text:
                 return None
-            return json.loads(text)
+            row = json.loads(text)
+            # Skip rows that don't belong to this table
+            if row.get("__table__") != self.name:
+                return None
+            # Remove internal tag before returning
+            row.pop("__table__", None)
+            return row
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
 
@@ -193,17 +201,19 @@ class Table:
             page_data = (ctypes.c_ubyte * PAGE_SIZE)()
             for i, b in enumerate(row_bytes):
                 page_data[i] = b
-            write_page(txn, self._next_page, ctypes.pointer(page_data))
+
+            # Allocate page from global database allocator
+            page_id = self.db.alloc_page()
+            write_page(txn, page_id, ctypes.pointer(page_data))
 
             if self._pk_col:
-                self._pk_index[clean_row[self._pk_col]] = self._next_page
+                self._pk_index[pk_val] = page_id
             for col_name in self._unique_cols:
-                self._unique_indexes[col_name][clean_row[col_name]] = self._next_page
+                self._unique_indexes[col_name][uval] = page_id
 
-            self._next_page += 1
             commit(txn)
 
-            if (self._next_page - 1) % 10 == 0:
+            if (page_id - 1) % 10 == 0:
                 checkpoint()
 
         except Exception:
@@ -270,8 +280,32 @@ class Table:
                 row_copy[other_key] = str(row_copy[other_key])
             outer_rows.append(json.dumps(row_copy).encode('utf-8'))
 
+        # >>>>>>>>>> ADDITIONAL DEBUG CHECKS <<<<<<<<<<
+        if not inner_rows:
+            print("[JOIN] Warning: inner_rows is empty!")
+        if not outer_rows:
+            print("[JOIN] Warning: outer_rows is empty!")
+
+        print(f"[JOIN DEBUG] About to call C hash_join with:")
+        print(f"  inner_rows = {len(inner_rows)} rows")
+        print(f"  outer_rows = {len(outer_rows)} rows")
+        print(f"  inner_key = '{self_key}', outer_key = '{other_key}'")
+
         if not inner_rows or not outer_rows:
             return []
+
+        # >>>>>>>>>> DEBUG PRINTS ADDED HERE <<<<<<<<<<
+        print(f"\n[DEBUG] Hash join plan:")
+        print(f"  Building hash table from table: '{self.name}' using key: '{self_key}'")
+        print(f"  Probing against table: '{other.name}' using key: '{other_key}'")
+        print(f"  Inner rows ({len(inner_rows)}):")
+        for r in inner_rows:
+            print(f"    {r.decode('utf-8')}")
+        print(f"  Outer rows ({len(outer_rows)}):")
+        for r in outer_rows:
+            print(f"    {r.decode('utf-8')}")
+        print()  # blank line for clarity
+        # >>>>>>>>>> END DEBUG <<<<<<<<<<
 
         output_buf = bytearray(1024 * 1024)  # 1MB buffer
         count = hash_join_c(inner_rows, outer_rows, self_key, other_key, output_buf)
@@ -298,12 +332,20 @@ class Table:
 
 class Database:
     CATALOG_PAGE = 0
+    NEXT_PAGE_KEY = "next_page"  # Key for storing global next_page in catalog
 
     def __init__(self, path: str):
         open_db(path.encode('utf-8'))
         self.path = path
         self.tables = {}
+        self.next_page = 1  # Global page allocator
         self._load_catalog()
+
+    def alloc_page(self) -> int:
+        """Allocate a new page ID globally."""
+        page = self.next_page
+        self.next_page += 1
+        return page
 
     def _save_catalog(self):
         catalog = {
@@ -313,7 +355,9 @@ class Database:
                     for col in table.columns.values()
                 ]
                 for name, table in self.tables.items()
-            }
+            },
+            # Save global next_page counter
+            self.NEXT_PAGE_KEY: self.next_page
         }
         txn = begin_write()
         try:
@@ -336,13 +380,17 @@ class Database:
             text = raw.rstrip(b'\x00').decode('utf-8')
             if text:
                 catalog = json.loads(text)
+                # Restore global next_page counter
+                self.next_page = catalog.get(self.NEXT_PAGE_KEY, 1)
+
                 for name, col_specs in catalog.get("tables", {}).items():
                     columns = []
                     for spec in col_specs:
                         col_name, dtype_str, pk, uniq = spec
                         dtype = DataType(dtype_str)
                         columns.append(Column(col_name, dtype, primary_key=pk, unique=uniq))
-                    self.tables[name] = Table(name, columns, self.path)
+                    # Pass self (Database instance) to Table
+                    self.tables[name] = Table(name, columns, self.path, self)
         except:
             pass
 
@@ -352,7 +400,8 @@ class Database:
         pk_count = sum(1 for col in columns if col.primary_key)
         if pk_count > 1:
             raise ValueError("Only one primary key allowed")
-        tbl = Table(name, columns, self.path)
+        # Pass self to Table so it can allocate pages
+        tbl = Table(name, columns, self.path, self)
         self.tables[name] = tbl
         self._save_catalog()
         return tbl

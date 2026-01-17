@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdbool.h>  // ← ADD THIS LINE
+#include <stdbool.h>
 
 #define HASH_SIZE 4096
 #define INIT_CAP 4
@@ -42,16 +42,16 @@ static char* strdup_safe(const char* s) {
    ========================= */
 int hash_join(
     const char** inner_rows,
-    int inner_count,
+    size_t inner_count,
     const char** outer_rows,
-    int outer_count,
+    size_t outer_count,
     const char* inner_key,
     const char* outer_key,
     char* output_buf,
-    int output_buf_size
+    size_t output_buf_size
 ) {
-    int result_count = 0;
-    int out_pos = 0;
+    size_t result_count = 0;
+    size_t out_pos = 0;
     PyObject* json = NULL;
     PyObject* loads = NULL;
     PyObject* dumps = NULL;
@@ -71,8 +71,8 @@ int hash_join(
     HashEntry table[HASH_SIZE];
     memset(table, 0, sizeof(table));
 
-    for (int i = 0; i < inner_count; i++) {
-        PyObject* py_row = PyUnicode_FromString(inner_rows[i]);
+    for (size_t i = 0; i < inner_count; i++) {
+        PyObject* py_row = PyUnicode_DecodeUTF8(inner_rows[i], strlen(inner_rows[i]), NULL);
         PyObject* row_dict = PyObject_CallOneArg(loads, py_row);
         Py_DECREF(py_row);
 
@@ -139,8 +139,8 @@ int hash_join(
     }
 
     /* ---------- Probe phase ---------- */
-    for (int i = 0; i < outer_count; i++) {
-        PyObject* py_row = PyUnicode_FromString(outer_rows[i]);
+    for (size_t i = 0; i < outer_count; i++) {
+        PyObject* py_row = PyUnicode_DecodeUTF8(outer_rows[i], strlen(outer_rows[i]), NULL);
         PyObject* outer_dict = PyObject_CallOneArg(loads, py_row);
         Py_DECREF(py_row);
 
@@ -176,7 +176,7 @@ int hash_join(
             if (strcmp(table[idx].key, key_cstr) == 0) {
                 fprintf(stderr, "[MATCH] Found %zu rows for key='%s'\n", table[idx].count, key_cstr);
                 for (size_t j = 0; j < table[idx].count; j++) {
-                    PyObject* inner_py = PyUnicode_FromString(table[idx].rows[j]);
+                    PyObject* inner_py = PyUnicode_DecodeUTF8(table[idx].rows[j], strlen(table[idx].rows[j]), NULL);
                     PyObject* inner_dict = PyObject_CallOneArg(loads, inner_py);
                     Py_DECREF(inner_py);
 
@@ -189,7 +189,7 @@ int hash_join(
                     if (dumped) {
                         const char* out = PyUnicode_AsUTF8(dumped);
                         if (out) {
-                            int len = strlen(out) + 1;
+                            size_t len = strlen(out) + 1;
                             if (out_pos + len <= output_buf_size) {
                                 memcpy(output_buf + out_pos, out, len);
                                 out_pos += len;
@@ -235,5 +235,5 @@ cleanup:
     Py_XDECREF(json);
 
     PyGILState_Release(gstate);
-    return result_count;
+    return (int)result_count;
 }

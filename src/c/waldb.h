@@ -22,8 +22,10 @@ void waldb_commit(WriteTxn* txn);
 void waldb_checkpoint(void);
 
 int hash_join(
-    const char* inner_pages[], size_t inner_count,
-    const char* outer_pages[], size_t outer_count,
+    const char* inner_pages[],
+    size_t inner_count,
+    const char* outer_pages[],
+    size_t outer_count,
     const char* inner_key_name,
     const char* outer_key_name,
     char* output_buffer,
