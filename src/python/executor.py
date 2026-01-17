@@ -212,9 +212,7 @@ class Table:
                 self._unique_indexes[col_name][uval] = page_id
 
             commit(txn)
-
-            if (page_id - 1) % 10 == 0:
-                checkpoint()
+            checkpoint()  # ✅ Always checkpoint during development
 
         except Exception:
             raise
@@ -238,6 +236,75 @@ class Table:
                 del self._unique_indexes[key_col][key_val]
 
             commit(txn)
+            # Optional: checkpoint() here if you want immediate durability
+        except Exception:
+            raise
+
+    def update(self, where_col: str, where_val: Any, updates: Dict[str, Any]):
+        # Validate that all update keys are valid columns
+        for col_name in updates:
+            if col_name not in self.columns:
+                raise ValueError(f"Unknown column: {col_name}")
+            self.columns[col_name].validate(updates[col_name])
+
+        # Find the page_id of the row to update
+        page_id = self._find_page_by_key(where_col, where_val)
+        if page_id is None:
+            raise KeyError(f"No row with {where_col} = {where_val}")
+
+        # Read the existing row
+        txn = begin_read()
+        raw_ptr = read_page(txn, page_id)
+        raw = bytes(raw_ptr.contents)
+        old_row = self._deserialize_row(raw)
+        if old_row is None or old_row.get("__deleted__"):
+            raise KeyError("Row not found")
+
+        # Apply updates
+        new_row = old_row.copy()
+        for col, val in updates.items():
+            new_row[col] = val
+
+        # Enforce PK/unique constraints on updated values
+        if self._pk_col and self._pk_col in updates:
+            new_pk = new_row[self._pk_col]
+            if new_pk != where_val and new_pk in self._pk_index:
+                raise ValueError(f"Duplicate primary key: {new_pk}")
+
+        for col in self._unique_cols:
+            if col in updates:
+                new_val = new_row[col]
+                if new_val in self._unique_indexes[col] and self._unique_indexes[col][new_val] != page_id:
+                    raise ValueError(f"Duplicate unique value in '{col}': {new_val}")
+
+        # Write updated row
+        txn_write = begin_write()
+        try:
+            row_bytes = self._serialize_row(new_row)
+            if len(row_bytes) > PAGE_SIZE:
+                raise ValueError("Row too large")
+            page_data = (ctypes.c_ubyte * PAGE_SIZE)()
+            for i, b in enumerate(row_bytes):
+                page_data[i] = b
+            write_page(txn_write, page_id, ctypes.pointer(page_data))
+            commit(txn_write)
+            # Optional: checkpoint()
+            # Update indexes
+            if self._pk_col and self._pk_col in updates:
+                del self._pk_index[where_val]
+                self._pk_index[new_row[self._pk_col]] = page_id
+
+            for col in self._unique_cols:
+                if col in updates:
+                    # Remove old value if it was indexed
+                    if where_col == col:
+                        old_val = where_val
+                    else:
+                        old_val = old_row.get(col)
+                    if old_val is not None and old_val in self._unique_indexes[col]:
+                        del self._unique_indexes[col][old_val]
+                    self._unique_indexes[col][new_row[col]] = page_id
+
         except Exception:
             raise
 
@@ -280,7 +347,6 @@ class Table:
                 row_copy[other_key] = str(row_copy[other_key])
             outer_rows.append(json.dumps(row_copy).encode('utf-8'))
 
-        # >>>>>>>>>> ADDITIONAL DEBUG CHECKS <<<<<<<<<<
         if not inner_rows:
             print("[JOIN] Warning: inner_rows is empty!")
         if not outer_rows:
@@ -294,7 +360,6 @@ class Table:
         if not inner_rows or not outer_rows:
             return []
 
-        # >>>>>>>>>> DEBUG PRINTS ADDED HERE <<<<<<<<<<
         print(f"\n[DEBUG] Hash join plan:")
         print(f"  Building hash table from table: '{self.name}' using key: '{self_key}'")
         print(f"  Probing against table: '{other.name}' using key: '{other_key}'")
@@ -304,8 +369,7 @@ class Table:
         print(f"  Outer rows ({len(outer_rows)}):")
         for r in outer_rows:
             print(f"    {r.decode('utf-8')}")
-        print()  # blank line for clarity
-        # >>>>>>>>>> END DEBUG <<<<<<<<<<
+        print()
 
         output_buf = bytearray(1024 * 1024)  # 1MB buffer
         count = hash_join_c(inner_rows, outer_rows, self_key, other_key, output_buf)
@@ -356,7 +420,6 @@ class Database:
                 ]
                 for name, table in self.tables.items()
             },
-            # Save global next_page counter
             self.NEXT_PAGE_KEY: self.next_page
         }
         txn = begin_write()
@@ -367,6 +430,7 @@ class Database:
                 buf[i] = b
             write_page(txn, self.CATALOG_PAGE, ctypes.pointer(buf))
             commit(txn)
+            checkpoint()  # ✅ CRITICAL: persist catalog to .pesa file
         except Exception as e:
             print(f"Warning: failed to save catalog: {e}")
 
@@ -380,7 +444,6 @@ class Database:
             text = raw.rstrip(b'\x00').decode('utf-8')
             if text:
                 catalog = json.loads(text)
-                # Restore global next_page counter
                 self.next_page = catalog.get(self.NEXT_PAGE_KEY, 1)
 
                 for name, col_specs in catalog.get("tables", {}).items():
@@ -389,7 +452,6 @@ class Database:
                         col_name, dtype_str, pk, uniq = spec
                         dtype = DataType(dtype_str)
                         columns.append(Column(col_name, dtype, primary_key=pk, unique=uniq))
-                    # Pass self (Database instance) to Table
                     self.tables[name] = Table(name, columns, self.path, self)
         except:
             pass
@@ -400,7 +462,6 @@ class Database:
         pk_count = sum(1 for col in columns if col.primary_key)
         if pk_count > 1:
             raise ValueError("Only one primary key allowed")
-        # Pass self to Table so it can allocate pages
         tbl = Table(name, columns, self.path, self)
         self.tables[name] = tbl
         self._save_catalog()

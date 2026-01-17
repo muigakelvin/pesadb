@@ -8,7 +8,7 @@ from executor import Database, Column, DataType
 
 def main():
     print("PesaDB REPL v2.1 — Safe, persistent, with C hash join!")
-    print("Commands: INS <table> ..., SEL <table> [WHERE col=val], DEL <table> <pk>, JOIN t1 t2 ON k1 k2, exit")
+    print("Commands: INS <table> ..., SEL <table> [WHERE col=val], DEL <table> <pk>, UPD <table> SET ... WHERE ..., JOIN t1 t2 ON k1 k2, exit")
     
     # Use 'data/' subdirectory for database files
     db_path = os.path.join("data", "data.pesa")
@@ -114,6 +114,63 @@ def main():
                 except Exception as e:
                     print("Delete error:", e)
 
+            elif verb == "UPD":
+                if len(parts) < 5 or "SET" not in parts or "WHERE" not in parts:
+                    print("Usage: UPD <table> SET col=val[,col2=val2] WHERE col=val")
+                    continue
+
+                table_name = parts[1]
+                set_idx = parts.index("SET")
+                where_idx = parts.index("WHERE")
+
+                if set_idx + 1 >= where_idx:
+                    print("Invalid SET/WHERE clause")
+                    continue
+
+                # Parse SET clause: "name=Alice,role=admin"
+                set_clause = " ".join(parts[set_idx+1:where_idx])
+                updates = {}
+                try:
+                    for pair in set_clause.split(","):
+                        if '=' not in pair:
+                            raise ValueError
+                        col, val = pair.split("=", 1)
+                        col = col.strip()
+                        val = val.strip()
+                        try:
+                            updates[col] = int(val)
+                        except ValueError:
+                            updates[col] = val
+                except Exception:
+                    print("Invalid SET clause: use col=val[,col2=val2]")
+                    continue
+
+                # Parse WHERE clause: must be exactly one token like "id=1"
+                if where_idx + 1 >= len(parts):
+                    print("WHERE clause must be: WHERE col=val")
+                    continue
+                where_expr = parts[where_idx + 1]
+                if '=' not in where_expr:
+                    print("WHERE clause must be: WHERE col=val")
+                    continue
+                try:
+                    where_col, where_val_str = where_expr.split('=', 1)
+                    where_val = int(where_val_str)
+                except ValueError:
+                    where_val = where_val_str
+
+                try:
+                    if table_name == "users":
+                        users.update(where_col, where_val, updates)
+                        print("✓ Updated users")
+                    elif table_name == "orders":
+                        orders.update(where_col, where_val, updates)
+                        print("✓ Updated orders")
+                    else:
+                        print("Unknown table")
+                except Exception as e:
+                    print("Update error:", e)
+
             elif verb == "JOIN":
                 if len(parts) == 6 and parts[3] == "ON":
                     t1, t2, k1, k2 = parts[1], parts[2], parts[4], parts[5]
@@ -131,7 +188,7 @@ def main():
                     print("Usage: JOIN <t1> <t2> ON <key1> <key2>")
 
             else:
-                print(f"Unknown command: '{parts[0]}'. Try: INS, SEL, DEL, JOIN, exit")
+                print(f"Unknown command: '{parts[0]}'. Try: INS, SEL, DEL, UPD, JOIN, exit")
 
         except KeyboardInterrupt:
             print("\nBye!")
